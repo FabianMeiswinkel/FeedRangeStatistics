@@ -114,19 +114,6 @@ namespace FeedRangeStatisticsSample
             public DateTimeOffset LastUpdated { get; private set; }
 
             public bool TryGetStatistics(
-                FeedRange logicalPartitionFeedRange,
-                out FeedRangeStatistics statistics)
-            {
-                if (this.exceptionToBeRethrown != null)
-                {
-                    throw this.exceptionToBeRethrown;
-                }
-
-                Dictionary<String, FeedRangeStatistics> snapshot = sampledPartitionStatistics;
-                return snapshot.TryGetValue(logicalPartitionFeedRange.ToJsonString(), out statistics);
-            }
-
-            public bool TryGetStatistics(
                 PartitionKey logicalPartitionKeyValue,
                 out FeedRangeStatistics statistics)
             {
@@ -218,7 +205,6 @@ namespace FeedRangeStatisticsSample
             public void Dispose()
             {
                 Dispose(disposing: true);
-                GC.SuppressFinalize(this);
             }
         }
     }
