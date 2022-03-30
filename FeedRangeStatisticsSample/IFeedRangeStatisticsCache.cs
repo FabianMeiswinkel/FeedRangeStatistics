@@ -11,6 +11,8 @@ namespace FeedRangeStatisticsSample
 
         public DateTimeOffset LastUpdated { get; }
 
-        public bool TryGetStatistics(PartitionKey logicalPartitionKeyValue, out FeedRangeStatistics statistics);
+        public bool TryGetStatistics(
+            PartitionKey logicalPartitionKeyValue,
+            out FeedRangeStatistics statistics);
     }
 }
