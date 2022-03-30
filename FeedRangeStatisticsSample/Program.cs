@@ -1,20 +1,18 @@
 ﻿using Microsoft.Azure.Cosmos;
 using Microsoft.Azure.Cosmos.Fluent;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Console;
 using System;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace FeedRangeStatisticsSample
 {
     internal class Program
     {
-        static int Main(string[] args)
+        static async Task<int> Main(string[] args)
         {
             try
             {
-                return MainAsync(args).ConfigureAwait(continueOnCapturedContext: false).GetAwaiter().GetResult();
+                return await MainAsync(args).ConfigureAwait(continueOnCapturedContext: false);
             }
             catch (Exception error)
             {
@@ -36,8 +34,9 @@ namespace FeedRangeStatisticsSample
                 .Create(logging => logging.AddConsole())
                 .CreateLogger<Program>();
 
-            var feedRangeStatisticsCache = 
-                await container.CreateFeedRangeStatisticsCache(TimeSpan.FromSeconds(1), logger, CancellationToken.None);
+            var feedRangeStatisticsCache = await container.CreateFeedRangeStatisticsCache(
+                refreshInterval: TimeSpan.FromSeconds(1),
+                logger: logger);
 
             FeedRangeStatistics statistics = null;
 
