@@ -3,13 +3,9 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Net;
-using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace FeedRangeStatisticsSample
@@ -18,64 +14,18 @@ namespace FeedRangeStatisticsSample
     {
         public static async Task<IFeedRangeStatisticsCache> CreateFeedRangeStatisticsCache(
             this Container container,
-            TimeSpan refreshInterval,            
-            ILogger logger,
-            CancellationToken cancellationToken)
+            TimeSpan refreshInterval,
+            ILogger logger)
         {
-            if (container == null) {
+            if (container == null)
+            {
                 throw new ArgumentNullException(nameof(container));
             }
 
-            using var response = await container.ReadContainerStreamAsync(
-                new ContainerRequestOptions
-                {
-                    AddRequestHeaders = headers =>
-                    {
-                        headers.Add("x-ms-documentdb-populatepartitionstatistics", "true");
-                        headers.Add("x-ms-cosmos-internal-get-all-partition-key-stats", "true");
-                    }
-                },
-                cancellationToken);
-
-            response.EnsureSuccessStatusCode();
-
-            using var jsonDocument = await JsonDocument.ParseAsync(response.Content);
-            List<FeedRangeStatistics> statistics = ParseStatistics(jsonDocument);
-
-            return new FeedRangeStatisticsCache(
+            return await FeedRangeStatisticsCache.Create(
                 container,
-                jsonDocument.RootElement.GetProperty("_rid").GetString(),
-                statistics,
                 refreshInterval,
                 logger);
-        }
-
-        private static List<FeedRangeStatistics> ParseStatistics(JsonDocument jsonDocument)
-        {
-            List<FeedRangeStatistics> statistics = new List<FeedRangeStatistics>();
-            if (jsonDocument.RootElement.TryGetProperty("statistics", out JsonElement statisticsJson))
-            {
-                Trace.Assert(statisticsJson.ValueKind == JsonValueKind.Array);
-                foreach (JsonElement physicalPartitionStatistics in statisticsJson.EnumerateArray())
-                {
-                    if (physicalPartitionStatistics.TryGetProperty(
-                        "partitionKeys", out JsonElement logicalPartitionStatisticsArrayJson))
-                    {
-                        Trace.Assert(logicalPartitionStatisticsArrayJson.ValueKind == JsonValueKind.Array);
-                        foreach (JsonElement logicalPartitionStatisticsJson in
-                            logicalPartitionStatisticsArrayJson.EnumerateArray())
-                        {
-                            string feedRangeJson = $"{{\"PK\":\"{logicalPartitionStatisticsJson.GetProperty("partitionKey").GetRawText().Replace("\"", "\\\"")}\"}}";
-                            statistics.Add(new FeedRangeStatistics(
-                                FeedRange.FromJsonString(
-                                    feedRangeJson),
-                                logicalPartitionStatisticsJson.GetProperty("sizeInKB").GetInt64()));
-                        }
-                    }
-                }
-            }
-
-            return statistics;
         }
 
         private class FeedRangeStatisticsCache : IFeedRangeStatisticsCache
@@ -86,18 +36,28 @@ namespace FeedRangeStatisticsSample
             private bool disposedValue;
             private Exception exceptionToBeRethrown;
 
-            public FeedRangeStatisticsCache(
+            public static async Task<IFeedRangeStatisticsCache> Create(
                 Container container,
-                string rid,
-                IEnumerable<FeedRangeStatistics> sampledPartitionStatistics,
+                TimeSpan refreshInterval,
+                ILogger logger)
+            {
+                FeedRangeStatisticsCache feedRangeStatisticsCache = new FeedRangeStatisticsCache(
+                    container,
+                    refreshInterval,
+                    logger);
+
+                await feedRangeStatisticsCache.GetAndUpdateStatistics();
+
+                return feedRangeStatisticsCache;
+            }
+
+            private FeedRangeStatisticsCache(
+                Container container,
                 TimeSpan refreshInterval,
                 ILogger logger)
             {
                 this.Container = container;
-                this.ContainerResourceId = rid;
                 this.LastUpdated = DateTimeOffset.UtcNow;
-                this.sampledPartitionStatistics = 
-                    sampledPartitionStatistics.ToDictionary(statistics => statistics.LogicalPartitionFeedRange.ToJsonString());
                 this.refreshInterval = refreshInterval;
                 this.logger = logger;
 
@@ -114,6 +74,19 @@ namespace FeedRangeStatisticsSample
             public DateTimeOffset LastUpdated { get; private set; }
 
             public bool TryGetStatistics(
+                FeedRange logicalPartitionFeedRange,
+                out FeedRangeStatistics statistics)
+            {
+                if (this.exceptionToBeRethrown != null)
+                {
+                    throw this.exceptionToBeRethrown;
+                }
+
+                Dictionary<String, FeedRangeStatistics> snapshot = sampledPartitionStatistics;
+                return snapshot.TryGetValue(logicalPartitionFeedRange.ToJsonString(), out statistics);
+            }
+
+            public bool TryGetStatistics(
                 PartitionKey logicalPartitionKeyValue,
                 out FeedRangeStatistics statistics)
             {
@@ -126,6 +99,40 @@ namespace FeedRangeStatisticsSample
                 return snapshot.TryGetValue(FeedRange.FromPartitionKey(logicalPartitionKeyValue).ToJsonString(), out statistics);
             }
 
+            private async Task GetAndUpdateStatistics()
+            {
+                using var response = await this.Container.ReadContainerStreamAsync(
+                               new ContainerRequestOptions
+                               {
+                                   AddRequestHeaders = headers =>
+                                   {
+                                       headers.Add("x-ms-documentdb-populatepartitionstatistics", "true");
+                                       headers.Add("x-ms-cosmos-internal-get-all-partition-key-stats", "true");
+                                   }
+                               },
+                               cancellationToken: default);
+
+
+                response.EnsureSuccessStatusCode();
+
+                using var jsonDocument = await JsonDocument.ParseAsync(response.Content);
+
+                List<FeedRangeStatistics> statistics = ParseStatistics(jsonDocument);
+                this.sampledPartitionStatistics =
+                    statistics.ToDictionary(statistics => statistics.LogicalPartitionFeedRange.ToJsonString());
+
+                string rid = jsonDocument.RootElement.GetProperty("_rid").GetString();
+                if (this.ContainerResourceId == null)
+                {
+                    this.ContainerResourceId = rid;
+                }
+                else if (this.ContainerResourceId != rid)
+                {
+                    this.exceptionToBeRethrown = new InvalidOperationException(
+                        $"Container '{this.ContainerResourceId}' was deleted and recreated.");
+                }
+            }
+
             private async void StartRefreshLoop()
             {
                 while (!this.disposedValue)
@@ -136,40 +143,7 @@ namespace FeedRangeStatisticsSample
 
                         if (!this.disposedValue)
                         {
-                            using var response = await this.Container.ReadContainerStreamAsync(
-                                new ContainerRequestOptions
-                                {
-                                    AddRequestHeaders = headers =>
-                                    {
-                                        headers.Add("x-ms-documentdb-populatepartitionstatistics", "true");
-                                        headers.Add("x-ms-cosmos-internal-get-all-partition-key-stats", "true");
-                                    }
-                                },
-                                CancellationToken.None);
-
-                            if (response.StatusCode == HttpStatusCode.NotFound)
-                            {
-                                this.exceptionToBeRethrown = new InvalidOperationException(
-                                    $"Container '{this.ContainerResourceId}' was deleted and recreated.");
-
-                                break;
-                            }
-
-                            response.EnsureSuccessStatusCode();
-
-                            using var jsonDocument = await JsonDocument.ParseAsync(response.Content);
-
-                            if (this.ContainerResourceId != jsonDocument.RootElement.GetProperty("_rid").GetString())
-                            {
-                                this.exceptionToBeRethrown = new InvalidOperationException(
-                                    $"Container '{this.ContainerResourceId}' was deleted and recreated.");
-
-                                break;
-                            }
-
-                            List<FeedRangeStatistics> statistics = ParseStatistics(jsonDocument);
-                            this.sampledPartitionStatistics =
-                                statistics.ToDictionary(statistics => statistics.LogicalPartitionFeedRange.ToJsonString());
+                            await this.GetAndUpdateStatistics();
 
                             logger.LogInformation(
                                 "{0}|{1}|{2}({3}): Refreshed statistics successfully",
@@ -178,8 +152,14 @@ namespace FeedRangeStatisticsSample
                                 this.Container.Id,
                                 this.ContainerResourceId);
                         }
-                    } 
-                    catch(Exception error)
+                    }
+                    catch (CosmosException cosmosException) when (cosmosException.StatusCode == HttpStatusCode.NotFound)
+                    {
+                        this.exceptionToBeRethrown = new InvalidOperationException(
+                            $"Container '{this.ContainerResourceId}' was deleted and recreated.", cosmosException);
+                        break;
+                    }
+                    catch (Exception error)
                     {
                         if (this.logger != null)
                         {
@@ -192,6 +172,34 @@ namespace FeedRangeStatisticsSample
                         }
                     }
                 }
+            }
+
+            private static List<FeedRangeStatistics> ParseStatistics(JsonDocument jsonDocument)
+            {
+                List<FeedRangeStatistics> statistics = new List<FeedRangeStatistics>();
+                if (jsonDocument.RootElement.TryGetProperty("statistics", out JsonElement statisticsJson))
+                {
+                    Trace.Assert(statisticsJson.ValueKind == JsonValueKind.Array);
+                    foreach (JsonElement physicalPartitionStatistics in statisticsJson.EnumerateArray())
+                    {
+                        if (physicalPartitionStatistics.TryGetProperty(
+                            "partitionKeys", out JsonElement logicalPartitionStatisticsArrayJson))
+                        {
+                            Trace.Assert(logicalPartitionStatisticsArrayJson.ValueKind == JsonValueKind.Array);
+                            foreach (JsonElement logicalPartitionStatisticsJson in
+                                logicalPartitionStatisticsArrayJson.EnumerateArray())
+                            {
+                                string feedRangeJson = $"{{\"PK\":\"{logicalPartitionStatisticsJson.GetProperty("partitionKey").GetRawText().Replace("\"", "\\\"")}\"}}";
+                                statistics.Add(new FeedRangeStatistics(
+                                    FeedRange.FromJsonString(
+                                        feedRangeJson),
+                                    logicalPartitionStatisticsJson.GetProperty("sizeInKB").GetInt64()));
+                            }
+                        }
+                    }
+                }
+
+                return statistics;
             }
 
             protected virtual void Dispose(bool disposing)
