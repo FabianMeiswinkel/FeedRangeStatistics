@@ -12,6 +12,14 @@ namespace FeedRangeStatisticsSample
 {
     public static class FeedRangeStatisticsExtensions
     {
+        /// <summary>
+        /// Creates a new instance of the FeedRange statistics cache
+        /// </summary>
+        /// <param name="container">The container to track statistics for</param>
+        /// <param name="refreshInterval">The interval for refreshing teh statistics</param>
+        /// <param name="logger">The logger instance</param>
+        /// <returns>Returns a new instance of IFeedRangeStatisticsCache</returns>
+        /// <exception cref="ArgumentNullException">Can be thrown when Containeris null</exception>
         public static async Task<IFeedRangeStatisticsCache> CreateFeedRangeStatisticsCache(
             this Container container,
             TimeSpan refreshInterval,
@@ -103,10 +111,6 @@ namespace FeedRangeStatisticsSample
 
                 using var jsonDocument = await JsonDocument.ParseAsync(response.Content);
 
-                List<FeedRangeStatistics> statistics = ParseStatistics(jsonDocument);
-                this.sampledPartitionStatistics =
-                    statistics.ToDictionary(statistics => statistics.LogicalPartitionFeedRange.ToJsonString());
-
                 string rid = jsonDocument.RootElement.GetProperty("_rid").GetString();
                 if (this.ContainerResourceId == null)
                 {
@@ -116,7 +120,14 @@ namespace FeedRangeStatisticsSample
                 {
                     this.exceptionToBeRethrown = new InvalidOperationException(
                         $"Container '{this.ContainerResourceId}' was deleted and recreated.");
+
+                    return;
                 }
+
+                List<FeedRangeStatistics> statistics = ParseStatistics(jsonDocument);
+                this.sampledPartitionStatistics =
+                    statistics.ToDictionary(statistics => statistics.LogicalPartitionFeedRange.ToJsonString());
+                this.LastUpdated = DateTimeOffset.UtcNow;
             }
 
             private async void StartRefreshLoop()
